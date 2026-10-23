@@ -413,7 +413,17 @@ select {
 <div class="bar">
     <h1>XPath Maker</h1>
 
+    <span class="muted" id="formatNote"></span>
+
     <span class="grow"></span>
+
+    <button id="undoFormat" type="button" style="display:none">
+        Undo format
+    </button>
+
+    <button id="formatButton" type="button">
+        Format HTML
+    </button>
 
     <button id="themeButton" type="button">
         Dark Mode
@@ -562,6 +572,183 @@ function toText(raw) {
 
     return raw.replace(/\s+/g, " ").trim();
 }
+
+
+// --------------------------------------------------
+// Auto-format unstructured (minified) HTML
+// Only line breaks + indentation are added. Text, inline tags and
+// comments inside an element stay exactly as they were.
+// --------------------------------------------------
+const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img",
+    "input", "link", "meta", "param", "source", "track", "wbr"]);
+const INLINE_TAGS = new Set(["b", "strong", "i", "em", "u", "small", "sub", "sup",
+    "code", "mark", "abbr", "font", "s", "del", "ins", "br", "wbr", "q", "cite",
+    "time", "kbd", "var", "samp"]);
+const RAW_TAGS = new Set(["script", "style", "pre", "textarea"]);
+
+function beautifyHtml(src) {
+    const TOKEN = /<!--[\s\S]*?-->|<![^>]*>|<\/?[a-zA-Z][^\s>\/]*(?:"[^"]*"|'[^']*'|[^'">])*>/g;
+    const lines = [];
+    const stack = [];
+    let line = "";
+    let afterBlock = false;
+
+    const pad = () => "  ".repeat(stack.length);
+    const isEmpty = () => line.trim() === "";
+    const flush = () => {
+        const t = line.replace(/\s+$/, "");
+        if (t.trim()) lines.push(t);
+        line = "";
+    };
+    const startLine = () => { flush(); line = pad(); afterBlock = false; };
+
+    function addText(text) {
+        text = text.replace(/\s+/g, " ");
+        if (!text.trim()) {
+            if (!isEmpty() && !afterBlock) line += " ";      // single space between inline items
+            return;
+        }
+        if (afterBlock) startLine();
+        if (isEmpty()) text = text.replace(/^ /, "");
+        line += text;
+    }
+
+    let pos = 0, m;
+    while ((m = TOKEN.exec(src)) !== null) {
+        if (m.index > pos) addText(src.slice(pos, m.index));
+        pos = TOKEN.lastIndex;
+        const tok = m[0];
+
+        if (tok.startsWith("<!--")) {                         // comment: stays inline
+            if (afterBlock) startLine();
+            line += tok;
+            continue;
+        }
+        if (tok.startsWith("<!")) {                           // <!DOCTYPE ...>
+            startLine(); line += tok; afterBlock = true;
+            continue;
+        }
+
+        const closing = tok[1] === "/";
+        const name = tok.match(/^<\/?([a-zA-Z][^\s>\/]*)/)[1].toLowerCase();
+        const selfClose = /\/>$/.test(tok) || VOID_TAGS.has(name);
+        const structural = !INLINE_TAGS.has(name);
+
+        if (closing) {
+            let idx = -1;
+            for (let i = stack.length - 1; i >= 0; i--) {
+                if (stack[i].name === name) { idx = i; break; }
+            }
+            if (idx < 0) {                                    // stray closing tag (pasted fragment)
+                if (structural) startLine();
+                line += tok;
+                if (structural) afterBlock = true;
+                continue;
+            }
+            const rec = stack[idx];
+            stack.length = idx;
+            if (rec.structural && rec.block) startLine();     // closing tag on its own line
+            line += tok;
+            if (rec.structural) afterBlock = true;
+            continue;
+        }
+
+        if (structural) {
+            if (stack.length) stack[stack.length - 1].block = true;
+            startLine();
+        } else if (afterBlock) {
+            startLine();
+        }
+        line += tok;
+
+        if (selfClose) {
+            if (structural) afterBlock = true;
+        } else if (RAW_TAGS.has(name)) {                      // script/style/pre: keep content as is
+            const re = new RegExp("</" + name + "\\s*>", "ig");
+            re.lastIndex = pos;
+            const end = re.exec(src);
+            const stop = end ? end.index : src.length;
+            line += src.slice(pos, stop) + (end ? end[0] : "");
+            pos = end ? re.lastIndex : src.length;
+            TOKEN.lastIndex = pos;
+            afterBlock = true;
+        } else {
+            stack.push({ name: name, structural: structural, block: false });
+        }
+    }
+
+    if (pos < src.length) addText(src.slice(pos));
+    flush();
+    return lines.join("\n");
+}
+
+// "looks minified" = very few line breaks compared with the number of tags
+function looksUnstructured(text) {
+    const tags = (text.match(/</g) || []).length;
+    const rows = text.split("\n").length;
+    return tags >= 6 && rows * 4 < tags;
+}
+
+let beforeFormat = null;
+
+function formatNow(auto) {
+    const original = $("html").value;
+
+    if (!original.trim()) {
+        return;
+    }
+
+    if (original.length > 3000000) {
+        $("formatNote").textContent = "HTML is too large to format here.";
+        return;
+    }
+
+    const formatted = beautifyHtml(original);
+
+    if (formatted === original) {
+        $("formatNote").textContent = "Already structured.";
+        return;
+    }
+
+    beforeFormat = original;
+    $("html").value = formatted;
+    $("html").scrollTop = 0;
+
+    $("formatNote").textContent = auto
+        ? "Unstructured HTML was formatted automatically."
+        : "HTML formatted.";
+
+    $("undoFormat").style.display = "inline-block";
+    pendingText = "";
+    $("selectionBar").style.display = "none";
+}
+
+$("formatButton").onclick = function () {
+    formatNow(false);
+};
+
+$("undoFormat").onclick = function () {
+    if (beforeFormat === null) {
+        return;
+    }
+
+    $("html").value = beforeFormat;
+    beforeFormat = null;
+
+    $("formatNote").textContent = "Original HTML restored.";
+    $("undoFormat").style.display = "none";
+};
+
+// format automatically right after a paste
+$("html").addEventListener("paste", function () {
+    setTimeout(function () {
+        const value = $("html").value;
+
+        if (value.length <= 3000000 && looksUnstructured(value)) {
+            formatNow(true);
+        }
+    }, 0);
+});
 
 
 // --------------------------------------------------
@@ -851,6 +1038,10 @@ $("clearButton").onclick = function () {
 
     $("selectionBar").style.display = "none";
     $("copyAllButton").disabled = true;
+
+    beforeFormat = null;
+    $("formatNote").textContent = "";
+    $("undoFormat").style.display = "none";
 
     $("copyAllButton").textContent = "Copy All JSON";
 
