@@ -1,4 +1,5 @@
 import re
+import json
 import html as pyhtml  # for unescaping &alpha; &amp; ...
 from lxml import html
 
@@ -471,6 +472,112 @@ def xpath_maker(html_file, text, exact=False, with_text=False, anchor=True,
     if isinstance(text, dict):
         return {name: _search_one(root, t, *opts) for name, t in text.items()}
     return {t: _search_one(root, t, *opts) for t in text}
+
+
+# ---------------------------------------------------------------------------
+#  <script> tags (JSON-LD, __NEXT_DATA__, ...)
+# ---------------------------------------------------------------------------
+
+_SCRIPT_OPEN_RE = re.compile(r"\s*<script\b([^>]*)>?", re.I | re.S)
+_ATTR_RE = re.compile(
+    r"""([^\s=/>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
+
+# which attributes to try first when building the XPath
+_SCRIPT_ATTR_ORDER = ["id", "data-testid", "name", "type", "class", "src"]
+
+
+def is_script_tag(text):
+    """True when the selected text is a <script ...> opening tag."""
+    return bool(re.match(r"\s*<script\b", text or "", re.I))
+
+
+def _parse_script_tag(text):
+    """'<script id="x" type="application/json">' -> {'id': 'x', 'type': ...}"""
+    m = _SCRIPT_OPEN_RE.match(text)
+    attrs = {}
+    if m:
+        for a in _ATTR_RE.finditer(m.group(1)):
+            value = a.group(2) or a.group(3) or a.group(4) or ""
+            attrs[a.group(1).lower()] = pyhtml.unescape(value).strip()
+    return {k: v for k, v in attrs.items() if v}
+
+
+def _script_search_one(root, tag_text, with_text=True, limit=2):
+    attrs = _parse_script_tag(tag_text)
+    suffix = "/text()" if with_text else ""
+
+    # script elements that carry ALL attributes the user selected
+    cands = [s for s in root.xpath("//script")
+             if all((s.get(k) or "").strip() == v for k, v in attrs.items())]
+    if not cands:
+        return []
+
+    order = sorted(attrs, key=lambda k: (_SCRIPT_ATTR_ORDER.index(k)
+                   if k in _SCRIPT_ATTR_ORDER else 99, k))
+    out = []
+
+    def add(xp):
+        xp += suffix
+        if xp not in out:
+            out.append(xp)
+
+    # 1) reusable: built only from the attributes in the selected tag
+    #    (id first, then id+type ...) -> works on every page of the site
+    for n in range(1, len(order) + 1):
+        for i in range(len(order) - n + 1):
+            preds = "".join(f"[@{k} = {_lit(attrs[k])}]" for k in order[i:i + n])
+            xp = f"//script{preds}"
+            if len(root.xpath(xp)) == len(cands):
+                add(xp)
+                break
+        if out:
+            break
+
+    # 2) if the attributes match several scripts, pin down the first one
+    if len(cands) > 1 or not out:
+        el = cands[0]
+        expr = _unique_expr(el, root, "//", allow_tag_only=False, use_text=True)
+        if expr:
+            add("//" + expr)
+        else:
+            base = "//script" + "".join(
+                f"[@{k} = {_lit(attrs[k])}]" for k in order)
+            same = root.xpath(base)
+            add(f"({base})[{same.index(el) + 1}]" if el in same
+                else f"(//script)[{root.xpath('//script').index(el) + 1}]")
+
+    return out[:limit] if limit else out
+
+
+def xpath_script_maker(html_file, tag_text, with_text=True, limit=2,
+                       encoding="utf-8"):
+    """
+    Give the opening tag of a script, e.g.
+        <script id="__NEXT_DATA__" type="application/json">
+    and get XPaths back, e.g.
+        //script[@id = '__NEXT_DATA__']/text()
+
+    tag_text can be one string, a list, or a dict {name: text}
+    (same shape as xpath_maker).
+    """
+    root = html.parse(html_file, html.HTMLParser(encoding=encoding)).getroot()
+    if isinstance(tag_text, str):
+        return _script_search_one(root, tag_text, with_text, limit)
+    if isinstance(tag_text, dict):
+        return {k: _script_search_one(root, t, with_text, limit)
+                for k, t in tag_text.items()}
+    return {t: _script_search_one(root, t, with_text, limit) for t in tag_text}
+
+
+def extract_script_json(html_file, xpath, encoding="utf-8"):
+    """Run the XPath and return the parsed JSON (dict / list), or None."""
+    root = html.parse(html_file, html.HTMLParser(encoding=encoding)).getroot()
+    nodes = root.xpath(xpath)
+    raw = "".join(n if isinstance(n, str) else n.text_content() for n in nodes)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
