@@ -17,7 +17,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from lxml import html as lhtml
-from xpath_maker import xpath_maker
+from xpath_maker import xpath_maker, xpath_script_maker, is_script_tag
 
 
 # On a host (Hugging Face Spaces, Render ...) the platform provides PORT.
@@ -55,17 +55,30 @@ def generate(html_text, items, opts):
         file.write(html_text)
         path = file.name
 
+    # <script ...> selections use the script mode, everything else the normal one
+    plain = {k: v for k, v in texts.items() if not is_script_tag(v)}
+    scripts = {k: v for k, v in texts.items() if is_script_tag(v)}
+
     try:
-        found = xpath_maker(
-            path,
-            texts,
-            exact=bool(opts.get("exact", False)),
-            with_text=bool(opts.get("with_text", True)),
-            anchor=bool(opts.get("anchor", True)),
-            use_label=bool(opts.get("use_label", True)),
-            index=bool(opts.get("index", False)),
-            limit=limit,
-        )
+        found = {}
+        if plain:
+            found.update(xpath_maker(
+                path,
+                plain,
+                exact=bool(opts.get("exact", False)),
+                with_text=bool(opts.get("with_text", True)),
+                anchor=bool(opts.get("anchor", True)),
+                use_label=bool(opts.get("use_label", True)),
+                index=bool(opts.get("index", False)),
+                limit=limit,
+            ))
+        if scripts:
+            found.update(xpath_script_maker(
+                path,
+                scripts,
+                with_text=bool(opts.get("with_text", True)),
+                limit=limit,
+            ))
 
         root = lhtml.parse(
             path,
@@ -85,23 +98,35 @@ def generate(html_text, items, opts):
             try:
                 nodes = root.xpath(xp)
                 values = []
+                raw_parts = []
 
                 for node in nodes:
-                    if isinstance(node, str):
-                        value = node
-                    else:
-                        value = node.text_content()
-
+                    value = node if isinstance(node, str) else node.text_content()
+                    raw_parts.append(str(value))
                     value = " ".join(str(value).split())
 
                     if value:
-                        values.append(value)
+                        # script contents can be huge: shorten the preview
+                        values.append(value[:200] + ("…" if len(value) > 200 else ""))
 
-                block.append({
+                entry = {
                     "xpath": xp,
                     "count": len(nodes),
                     "values": values[:6]
-                })
+                }
+
+                # is it JSON?  (script tags like __NEXT_DATA__)
+                raw = "".join(raw_parts).strip()
+                if raw and raw[0] in "{[":
+                    try:
+                        data = json.loads(raw)
+                        entry["json"] = True
+                        entry["json_keys"] = (list(data.keys())[:12]
+                                              if isinstance(data, dict) else [])
+                    except ValueError:
+                        entry["json"] = False
+
+                block.append(entry)
 
             except Exception as error:
                 block.append({
@@ -560,8 +585,13 @@ $("themeButton").onclick = function () {
 // --------------------------------------------------
 // Selected source -> plain text
 // (removes tags / comments / entities, e.g. "₹<!-- -->139" -> "₹139")
+// A <script ...> opening tag is kept as it is (script mode).
 // --------------------------------------------------
 function toText(raw) {
+    if (/^\s*<script\b/i.test(raw)) {
+        return raw.replace(/\s+/g, " ").trim();
+    }
+
     if (/[<&]/.test(raw)) {
         try {
             raw = new DOMParser()
@@ -974,6 +1004,14 @@ function renderResults() {
             status.textContent = result.error
                 ? "Invalid XPath: " + result.error
                 : result.count + " node(s) matched";
+
+            if (result.json) {
+                status.textContent += " · valid JSON" +
+                    (result.json_keys && result.json_keys.length
+                        ? " (keys: " + result.json_keys.join(", ") + ")" : "");
+            } else if (result.json === false) {
+                status.textContent += " · not valid JSON";
+            }
 
             meta.append(copyButton, status);
             xpathBox.append(code, meta);
