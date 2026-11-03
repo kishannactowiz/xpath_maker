@@ -182,7 +182,15 @@ body.dark-mode {
     box-sizing: border-box;
 }
 
+html,
 body {
+    height: 100%;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     margin: 0;
     font: 15px/1.5 Arial, sans-serif;
     color: var(--text);
@@ -249,16 +257,39 @@ body.dark-mode button.primary {
     color: #111827;
 }
 
+#layout {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+#left {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--line);
+}
+
+#right {
+    min-height: 0;
+    overflow-y: auto;
+}
+
 #editor-wrap {
-    padding: 18px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 14px;
 }
 
 #html {
     display: block;
     width: 100%;
-    height: 55vh;
-    min-height: 280px;
-    resize: vertical;
+    flex: 1;
+    min-height: 200px;
+    resize: none;
     padding: 14px;
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -356,9 +387,7 @@ select {
 
 #results {
     width: 100%;
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 18px;
+    padding: 14px;
 }
 
 .result {
@@ -418,15 +447,31 @@ select {
     overflow-wrap: anywhere;
 }
 
-@media (max-width: 600px) {
-    #html {
-        height: 48vh;
+@media (max-width: 900px) {
+    html,
+    body {
+        height: auto;
     }
 
-    .bar,
-    #editor-wrap,
-    #results {
-        padding: 10px;
+    body {
+        overflow: auto;
+    }
+
+    #layout {
+        display: block;
+    }
+
+    #left {
+        border-right: 0;
+    }
+
+    #right {
+        overflow: visible;
+    }
+
+    #html {
+        flex: none;
+        height: 48vh;
     }
 }
 </style>
@@ -459,7 +504,10 @@ select {
     </button>
 </div>
 
-<!-- HTML source editor -->
+<div id="layout">
+
+<!-- LEFT: HTML source editor -->
+<div id="left">
 <div id="editor-wrap">
 
     <textarea
@@ -483,6 +531,11 @@ select {
     </div>
 
 </div>
+
+</div>
+
+<!-- RIGHT: options, selected texts, results -->
+<div id="right">
 
 <!-- XPath options -->
 <div id="options">
@@ -559,6 +612,9 @@ select {
 </div>
 
 <div id="results"></div>
+
+</div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
